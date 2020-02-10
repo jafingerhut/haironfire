@@ -2,7 +2,15 @@
   (:require [clojure.java.io :as io]
             [clojure.edn :as edn]
             [clojure.pprint :as pp]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [medley.core :as med]))
+
+(defn duplicates
+  "Return a map similar to (frequencies coll), except it only contains
+  keys equal to values that occur at least twice in coll."
+  [coll]
+  (->> (frequencies coll)
+       (med/filter-vals #(> %1 1))))
 
 (defn http-url-string? [string]
   (or (str/starts-with? string "http://")
@@ -29,6 +37,11 @@
             (not (string? scm-conn))
             {:artifact-loc-type :scm-connection-non-string-class,
              :class (class scm-conn)}
+
+            (and (str/starts-with? scm-conn "scm:git:")
+                 (str/ends-with? scm-conn "/.git"))
+            {:artifact-loc-type :scm-connection-git-but-missing-project-name
+             :maven-scm-provider "git"}
 
             (str/starts-with? scm-conn "scm:git:git://github.com")
             {:artifact-loc-type :scm-connection-github
@@ -111,6 +124,10 @@
       ;; else no :url key
       {:artifact-loc-type :no-scm-and-no-url})))
 
+(defn group-artifact-id
+  [art-map]
+  (str (:group-id art-map) ":" (:artifact-id art-map)))
+
 (defn read-clojars-feed [rdr]
   (let [sentinel-obj (Object.)]
     (loop [artifacts (transient [])]
@@ -149,14 +166,23 @@
         num-source-url-maybe (count (filter :source-url-maybe d))
         remaining (- n num-source-url num-source-url-maybe)
 
+        group-artifact-ids (map group-artifact-id d)
+        dup-group-artifact-ids (duplicates group-artifact-ids)
+        ndups (reduce + (vals dup-group-artifact-ids))
+
         msg1 (format "%d artifacts where
 %5d (%6.1f%%) appear to have usable URLs for accessing source code,
 %5d (%6.1f%%) have URLs that are less likely to be usable, and
-%5d (%6.1f%%) no URL likely to be usable at all was found."
+%5d (%6.1f%%) no URL likely to be usable at all was found.
+
+%5d (%6.1f%%) have unique (group-id:artifact-id) pair
+%5d (%6.1f%%) have (group-id:artifact-id) pair that is duplicate of another"
                      n
                      num-source-url (pctg num-source-url n)
                      num-source-url-maybe (pctg num-source-url-maybe n)
-                     remaining (pctg remaining n))
+                     remaining (pctg remaining n)
+                     (- n ndups) (pctg (- n ndups) n)
+                     ndups (pctg ndups n))
         msg2 (format
 "Artifacts partitioned into sets based on what kind of SCM :connection
 or :url key was found, or a :url key at the top level of the map:")
@@ -164,7 +190,8 @@ or :url key was found, or a :url key at the top level of the map:")
         msg3 (str/join "\n"
                        (for [[k cnt] loc-types]
                          (format "%5d (%6.1f%%) %s"
-                                 cnt (pctg cnt n) (name k))))]
+                                 cnt (pctg cnt n) (name k))))
+        ]
 
     {:data d,
      :string (str msg1 "\n\n" msg2 "\n" msg3)}))
@@ -179,6 +206,7 @@ or :url key was found, or a :url key at the top level of the map:")
 (require '[clojure.set :as set])
 (require '[clojure.string :as str])
 (require '[com.fingerhutpress.haironfire.clojars :as cloj] :reload)
+(require '[medley.core :as med])
 )
 ;; end of do
 
@@ -189,6 +217,15 @@ or :url key was found, or a :url key at the top level of the map:")
 (def as (:data tmp))
 (print (:string tmp))
 (count as)
+
+(->> as (filter :source-url) (map :source-url) (take 100) pprint)
+
+(->> as
+     (filter :source-url)
+     (map :source-url)
+     (filter #(str/includes? % "github.com//.git"))
+     (take 20)
+     pprint)
 
 (defn sorted-key-set [my-map]
   (into (sorted-set) (keys my-map)))

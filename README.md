@@ -83,14 +83,14 @@ percentage of `project.clj` file use each of the different keys like
 This Clojars documentation page gives several programmatic ways to
 retrieve data about projects hosted on Clojars:
 
-* https://github.com/clojars/clojars-web/wiki/Data
++ https://github.com/clojars/clojars-web/wiki/Data
 
 After reading the choices available, and looking at the data returned
 by a few of the URLs, I think the one below might be the most useful
 for my purposes, because this file contains URLs for the source code
 of each project:
 
-* http://clojars.org/repo/feed.clj.gz
++ http://clojars.org/repo/feed.clj.gz
 
 
 # Data to collect
@@ -105,3 +105,27 @@ sample.
 ```bash
 $ curl -O http://clojars.org/repo/feed.clj.gz
 ```
+
+
+# Maven SCM strings
+
+Strings beginning with `scm:` such as
+`scm:git:ssh://git@github.com/quoll/naga.git` are used as values of
+the `connection` and/or `developerConnection` property in a Maven
+`pom.xml` file to specify the location of the source code of a
+project.  They are documented at least at the link below, and probably
+other places:
+
++ http://maven.apache.org/pom.html#SCM
+
+The string that appears after the initial `scm:` and before the second
+`:` character are called a "provider" in the Maven documentation.
+
+The providers I have seen used on Clojars are:
+
++ `bazaar` - no others begin with `b`
++ `cvs` - no others begin with `c`
++ `git` - no others begin with `g`
++ `hg` - one begins with `scm:http`, but nothing else begins with `scm:h`
++ `svn` - no others begin with `s`
++ No others that start with any letter other than `[bcghs]`.

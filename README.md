@@ -106,6 +106,10 @@ sample.
 $ curl -O http://clojars.org/repo/feed.clj.gz
 ```
 
+Strangely enough, using that `curl` command sometimes gives me back a
+short 301 or 302 response rather than the data, whereas that URL seems
+to work fine from a browser like Firefox.  I do not know why.
+
 
 # Maven SCM strings
 

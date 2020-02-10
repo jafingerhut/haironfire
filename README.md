@@ -1,19 +1,23 @@
 # Introduction
 
-TBD
+The name is a reference to the Leiningen software's motto: "for
+automating Clojure projects without setting your hair on fire".  If
+you have not read the short story ["Leiningen Versus the
+Ants"](http://www.classicshorts.com/stories/lvta.html), from which the
+Leiningen software gets its name, I highly recommend it.
 
 The code in this project was written in an attempt to answer the
 following question: What fraction of Clojure projects that use
 Leiningen, have a `project.clj` file that is in EDN format, with no
 executable code?
 
-Background: Many Leiningen `project.clj` files contain a single list
-starting with `defproject`, and contain only Clojure data, with no
-executable code.  Such a file can be read using Clojure's
-`clojure.edn/read` function without error, and without any loss of the
-information intended by the author of that `project.clj` file.  Such
-files also create no security concerns of executing untrusted code, in
-order for a consumer to extract that data.
+Background: Many Leiningen `project.clj` files contain a single
+Clojure list starting with `defproject`, and contain only Clojure
+data, with no executable code.  Such a file can be read using
+Clojure's `clojure.edn/read` function without error, and without any
+loss of the information intended by the author of that `project.clj`
+file.  Such files also create no security concerns of executing
+untrusted code, in order for a consumer to extract that data.
 
 However, `project.clj` file contents are `eval`d by Leiningen, which
 enables developers to write executable code in them.  In such files,
@@ -23,21 +27,21 @@ known without evaluating the `project.clj` file.
 TBD: Find an example or two of `project.clj` files of actual Clojure
 projects that do this, if I can, and link to them.
 
-Alex Miller asked in an on line discussion about the tools.deps
+Alex Miller asked in an on-line discussion about the tools.deps
 library in February 2020 what the actual percentage of Leiningen files
 was that contained no executable code.  His motivation for asking was
-because if it is very high, e.g. 99%, it could become worth the time
-to enable tools.deps to use `clojure.edn/read` to extract the value of
-the `:dependencies` key in the `defproject` form to get the
-dependencies of a Leiningen project in source code, e.g. via a git
-commit SHA reference to the Leininge project source code in a
-`deps.edn` file.
+because if this percentage is very high, e.g. 99%, it could become
+worth the time to enable tools.deps to use `clojure.edn/read` to
+extract the value of the `:dependencies` key in the `defproject` form
+to get the dependencies of a Leiningen project in source code,
+e.g. via a git commit SHA reference to the Leiningen project source
+code in a `deps.edn` file.
 
 If the percentage is much lower, e.g. 80%, it might not be worth doing
 this in tools.deps, because it would fail for so many projects.  While
 the suggestion was made that one could in tools.deps try to `eval` the
 contents of a `project.clj` file in a sandboxed environment,
-e.g. something similar to the
+e.g. using something similar to the
 [`clojail`](https://github.com/Raynes/clojail) library, Alex consders
 such an approach to be too much effort to develop and maintain over
 time to be worth it.

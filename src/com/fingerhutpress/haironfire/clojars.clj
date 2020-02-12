@@ -487,6 +487,11 @@ or :url key was found, or a :url key at the top level of the map:")
                      {:error false,
                       :tooling-files (med/map-vals first reg-files)}))))))))
 
+(defn projects-retrieved [^String repos-dir-abs-path]
+  (let [repos-dir (java.io.File. repos-dir-abs-path)
+        possible-repo-dirs (files-in-directory repos-dir)]
+    (map one-project-retrieved-info possible-repo-dirs)))
+
 (defn defproject-form?
   "Return {:error false :data d} if `form` appears to be a Leiningen
   defproject form, where d is a Clojure map.  The keys of d are the
@@ -677,6 +682,78 @@ or :url key was found, or a :url key at the top level of the map:")
       ;; common one.
       {:error false})))
 
+(defn categorize-lein-projects [project-maps]
+  (let [project-clj-fnames (map #(:path ((:tooling-files %) "project.clj"))
+                                project-maps)
+        projinfos (mapv project-clj-file-info project-clj-fnames)
+        ;; Divide them into ones that caused exceptions while reading
+        ;; the project.clj file (excs), those that had a defproject
+        ;; form that looks good first in the file (ok), and those that
+        ;; had something other than a defproject form first in that
+        ;; file (bad).
+        excs (filter :exception projinfos)
+        ok (filter :first-form-defproject? projinfos)
+        bad (filter #(false? (:first-form-defproject? %)) projinfos)
+
+        ;; Categorize the kinds of exceptions thrown while trying to
+        ;; use clojure.edn/read to read the project.clj file.
+        excs-grouped (group-by my-exc-cause excs)
+        bad-grouped (group-by :defproject-form-info bad)
+
+        ;; For the ones that look like they have a defproject form
+        ;; first, examine their :dependencies value to see if it looks
+        ;; good.
+        okdeps (map (fn [pi]
+                      (assoc pi :dependencies-check (good-lein-deps?
+                                                     (:defproject-form-info pi))))
+                    ok)
+        ok-deps-ok (filter #(false? (get-in % [:dependencies-check :error]))
+                          okdeps)
+        ok-deps-bad (filter #(true? (get-in % [:dependencies-check :error]))
+                            okdeps)
+
+        ok-deps-bad-grps (group-by #(get-in % [:dependencies-check :description])
+                                   ok-deps-bad)]
+
+    {:project-maps project-maps
+     :exceptions-during-edn-read excs
+     :exceptions-during-edn-read-by-reason excs-grouped
+     :defproject-not-first-or-failed-basic-checks bad
+     :defproject-not-first-or-failed-basic-checks-by-reason bad-grouped
+     :defproject-found-basic-checks-only okdeps
+     :defproject-found-dependencies-problems ok-deps-bad
+     :defproject-found-dependencies-problems-by-reason ok-deps-bad-grps
+     :defproject-found-dependencies-ok ok-deps-ok}))
+
+(defn print-lein-project-summary [lein-project-data]
+  (let [n1 (count (:project-maps lein-project-data))
+        n2 (count (:defproject-found-dependencies-ok lein-project-data))
+        n3 (count (:exceptions-during-edn-read lein-project-data))
+        n4 (count (:defproject-not-first-or-failed-basic-checks lein-project-data))
+        n5 (count (:defproject-found-dependencies-problems lein-project-data))
+        excs-grouped (:exceptions-during-edn-read-by-reason lein-project-data)
+        bad-grouped (:defproject-not-first-or-failed-basic-checks-by-reason lein-project-data)
+        ok-bad-deps-grouped (:defproject-found-dependencies-problems-by-reason lein-project-data)
+        ]
+    (println (format "%5d projects analyzed" n1))
+    (println (format "%5d (%6.1f%%) EDN-readable project.clj files with well formed :dependencies (or no :dependencies key)"
+                     n2 (pctg n2 n1)))
+    (println (format "%5d (%6.1f%%) threw exceptions while trying to read as EDN (breakdown 1 below)"
+                     n3 (pctg n3 n1)))
+    (println (format "%5d (%6.1f%%) EDN-readable, but something other than defproject form read first (breakdown 2 below)"
+                     n4 (pctg n4 n1)))
+    (println (format "%5d (%6.1f%%) defproject form first, but :dependencies look ill formed (breakdown 3 below)"
+                     n5 (pctg n5 n1)))
+    (println)
+    (println "Breakdown 1 of reasons for EDN reading of project.clj throwing exception:")
+    (pp/pprint (group-by->freqs excs-grouped))
+    (println)
+    (println "Breakdown 2 of reasons first form doesn't appear to be a defproject:")
+    (pp/pprint (group-by->freqs bad-grouped))
+    (println)
+    (println "Breakdown 3 of reasons defproject :dependencies value looks wrong, or more likely needs examination of :managed-dependencies in this or a different project to interpret:")
+    (pp/pprint (group-by->freqs ok-bad-deps-grouped))))
+
 
 (comment
 
@@ -726,40 +803,9 @@ or :url key was found, or a :url key at the top level of the map:")
 (cloj/write-git-clone-bash-script "get-artifact-source.sh" repos-dir-abs-path
                                   as)
 
-;; _Executing_ the bash script get-artifact-source.sh can take many
-;; hours, depending upon your Internet access speed, and the number of
-;; projects it attempts to get.
-
-;; When I ran it in 2020-Feb, it took most of one day to run,
-;; attempting to do 'git clone' on 15,154 URLs.
-
-;; It created files totaling about about 42 Gbytes of space.  Most of
-;; the git repositories are pretty small.  The largest 90 of them took
-;; just over half of that storage, just over 21 Gbytes.  The
-;; remaining (13,386-90) that were successfully cloned (see below)
-;; took an average of about 1.6 Mbytes of space each.
-
-;; Some of those URLs were invalid, probably because they were entered
-;; incorrectly when the Clojars artifact was created, or they were
-;; valid when the Clojars artifact was created, but had since been
-;; removed.
-
-;; Of the 15,154 attempted:
-;; + 1,768 'git clone' commands gave a non-0 exit status, indicating
-;;   some kind of failure.
-;; + 13,386 returned a 0 exit status, for success.
-
-;; Of the 13,386 that succeeded:
-
-;; + 12,078 contained a file project.clj in the root directory
-;; +    541 contained a file deps.edn    in the root directory
-;; +    635 contained a file build.boot  in the root directory
-;; +    500 contained a file pom.xml     in the root directory
-
-;; Some of those directories contained more than one of those files.
-;; I will write code to calculate how many project had each of the 2^4
-;; possible combinations of those file present/absent.
-
+;; See README section Data collected, and analysis results" for
+;; details on how long running that bash script took on my system.  It
+;; is by far the longest step of the process.
 
 
 ;; After downloading is complete, almost all of the remaining steps
@@ -775,29 +821,83 @@ or :url key was found, or a :url key at the top level of the map:")
 
 ;; project.clj pom.xml build.boot deps.edn
 
-#_(def repos-dir-abs-path "/home/andy/clj/haironfire/repos")
+(def repos-dir-abs-path "/home/andy/clj/haironfire/repos")
 #_(def repos-dir-abs-path "/home/andy/clj/haironfire/repos-small-test")
+(def proj-locs (cloj/projects-retrieved repos-dir-abs-path))
+(count proj-locs)
 
-;; TBD: write projects-retrieved
-(def proj-locs (projects-retrieved repos-dir-abs-path))
+(def projerr (filter :error proj-locs))
+(def projok (remove :error proj-locs))
 
-(def repos-dir (java.io.File. repos-dir-abs-path))
-repos-dir
-(def repo-dirs (cloj/files-in-directory repos-dir))
-(pprint repo-dirs)
-(class (nth repo-dirs 0))
-(pprint (cloj/one-project-retrieved-info (nth repo-dirs 0)))
-(pprint (cloj/one-project-retrieved-info (nth repo-dirs 1)))
-(pprint (cloj/one-project-retrieved-info (nth repo-dirs 2)))
-(pprint (cloj/one-project-retrieved-info (nth repo-dirs 3)))
-(pprint (cloj/one-project-retrieved-info (nth repo-dirs 4)))
+(count projerr)
+;; 1769
+(count projok)
+;; 13386
+
+(def projerrgrp (group-by :description projerr))
+(count projerrgrp)
+(pprint (cloj/group-by->freqs projerrgrp))
+;; {"Should be exactly 1 sub-directory" 1712,
+;;  "File exit_status.txt should contain number 0 but found 1" 56,
+;;  "Should be exactly 1 file named exit_status.txt" 1}
+
+(pprint (projerrgrp "Should be exactly 1 file named exit_status.txt"))
+;; Not sure why there is a repos/lark directory which has a .git
+;; directory.  Maybe a problem in the git cloning script related to
+;; the lark repos?  It seems to be the only directory like this.
+
+(def projokgrp (group-by #(into (sorted-set) (keys (:tooling-files %))) projok))
+(pprint (cloj/group-by->freqs projokgrp))
+;; {
+;;  ;; no deps.edn, but project.clj
+;;  #{"project.clj"} 11509,
+;;  #{"pom.xml" "project.clj"} 181,
+;;  #{"build.boot" "project.clj"} 42,
+;;  #{"build.boot" "pom.xml" "project.clj"} 4,
+;;
+;;  ;; neither deps.edn nor project.clj
+;;  #{"pom.xml"} 137,
+;;  #{"build.boot"} 558,
+;;  #{} 418,
+;;
+;;  ;; deps.edn and project.clj
+;;  #{"deps.edn" "project.clj"} 272,
+;;  #{"deps.edn" "pom.xml" "project.clj"} 14,
+;;  #{"build.boot" "deps.edn" "project.clj"} 2,
+;;  #{"build.boot" "deps.edn" "pom.xml" "project.clj"} 1
+;;
+;;  ;; deps.edn but no project.clj
+;;  #{"deps.edn"} 64,
+;;  #{"deps.edn" "pom.xml"} 157,
+;;  #{"build.boot" "deps.edn"} 23,
+;;  #{"build.boot" "deps.edn" "pom.xml"} 4,
+;; }
+
+;; pg1 "Group 1" projects have no deps.edn file, but do have a project.clj file
+;; pg2 "Group 2" projects have a deps.edn file, and a project.clj file
+
+(def pg1 (filter #(and (contains? (:tooling-files %) "project.clj")
+                       (not (contains? (:tooling-files %) "deps.edn")))
+                 projok))
+(count pg1)
+;; 11,736 checks with the stats above
+
+(def pg2 (filter #(and (contains? (:tooling-files %) "project.clj")
+                       (contains? (:tooling-files %) "deps.edn"))
+                 projok))
+(count pg2)
+;; 289 checks with the stats above
+
+(def proj-group pg1)
+(def proj-group pg2)
+
+(def d (cloj/categorize-lein-projects proj-group))
+(cloj/print-lein-project-summary d)
 
 
-;; cd haironfire root dir, then:
-;; /bin/ls repos/*/*/project.clj > locs-project.clj-files.txt
 
-(def project-clj-fnames (vec (line-seq (io/reader "locs-project.clj-files.txt"))))
 (count project-clj-fnames)
+;; pg1 11736   pg2 289
 (pprint (take 5 project-clj-fnames))
 
 (def projinfos (mapv cloj/project-clj-file-info project-clj-fnames))
@@ -805,20 +905,13 @@ repos-dir
 (def ok (filter :first-form-defproject? projinfos))
 (def bad (filter #(false? (:first-form-defproject? %)) projinfos))
 (count projinfos)
-;; 12078
+;; 12078   pg1 11736
 (count excs)
-;; 975
+;; 975     pg1 917
 (count ok)
-;; 11064
+;; 11064   pg1 10784
 (count bad)
-;; 39
-
-;; This issue scares me a bit, in that it makes me wonder whether
-;; symbols in extracted dependencies might have ' characters in them
-;; when they should not.  TBD: I should be able to automate a check of
-;; all symbols in all :dependencies values EDN-readable project.clj
-;; files to see if they contain any ' characters in their names, and
-;; flag those for closer attention.
+;; 39      pg1 35
 
 (with-open [wrtr (io/writer "tmp.clj")]
   (binding [*out* wrtr]
@@ -828,18 +921,20 @@ repos-dir
 
 (def gexcs (group-by cloj/my-exc-cause excs))
 (pprint (cloj/group-by->freqs gexcs))
-;; {"No dispatch macro for: \"" 577,
-;;  "Invalid leading character: ~" 278,
-;;  "No dispatch macro for: (" 90,
-;;  "No dispatch macro for: =" 11,
+;; pg1:
+;; {"No dispatch macro for: \"" 541,
+;;  "Invalid leading character: ~" 263,
+;;  "No dispatch macro for: (" 89,
 ;;  "Invalid leading character: `" 7,
-;;  "Invalid leading character: @" 3,
+;;  "No dispatch macro for: =" 6,
 ;;  "No dispatch macro for: '" 3,
 ;;  "Invalid token: ::min-lein-version" 3,
+;;  "Invalid leading character: @" 2,
 ;;  "Map literal must contain an even number of forms" 1,
 ;;  "Invalid token: ::edge-features" 1,
-;;  "Invalid token: ::url" 1
-;; }
+;;  "Invalid token: ::url" 1}
+
+;; pg2:
 
 ;; Examples of, and common reasons for, "No dispatch macro for: \"":
 ;; All of them are regexes, of course.  _Why_ the regexes are useful
@@ -873,22 +968,22 @@ repos-dir
 (pprint (gexcs "Invalid leading character: @"))
 (pprint (take 15 (gexcs "No dispatch macro for: \"")))
 
-(pprint (nth ok 0))
-(pprint (nth bad 0))
 
 (def badbyreason (group-by :defproject-form-info bad))
 (count badbyreason)
 (pprint (keys badbyreason))
 (pprint (cloj/group-by->freqs badbyreason))
-;; {{:error true, :description "List does not start with symbol 'defproject'"}
-;; 34,
-;; {:error true, :description "Not a list"}
-;; 3,
-;; {:error true, :description "defproject list had non-keywords where keyword expected, first beingfavicon"}
-;; 1,
+;; pg1:
+;;{{:error true, :description "List does not start with symbol 'defproject'"}
+;; 30,
+;; {:error true, :description "Not a list"} 3,
 ;; {:error true, :description "defproject list must have odd number of elements"}
-;; 1
-;; }
+;; 1,
+;; {:error true, :description
+;;  "defproject list had non-keywords where keyword expected, first beingfavicon"}
+;; 1}
+
+
 (def tmperr {:error true, :description "defproject list had non-keywords where keyword expected, first beingfavicon"})
 (def tmperr {:error true, :description "Not a list"})
 (pprint (take 5 (badbyreason tmperr)))
@@ -905,7 +1000,9 @@ repos-dir
 (def ok-okdeps (filter #(false? (get-in % [:dependencies-check :error])) okdeps))
 (def ok-baddeps (filter #(true? (get-in % [:dependencies-check :error])) okdeps))
 (count ok-okdeps)
+;; pg1 10768   pg2
 (count ok-baddeps)
+;; pg1 16
 
 (def ok-baddeps-grps (group-by #(get-in % [:dependencies-check :description]) ok-baddeps))
 (count ok-baddeps-grps)

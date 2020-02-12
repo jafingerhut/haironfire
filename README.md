@@ -61,9 +61,10 @@ level `:dependencies` value of the `project.clj` file.
 How many of the published JAR files contain one or more of these files
 in the 'root directory' of the JAR?
 
-+ `project.clj` file
-+ `pom.xml` file
-+ `deps.edn` file
++ `project.clj`
++ `pom.xml`
++ `deps.edn`
++ `boot.build`
 
 How many of the published JAR files contain one or more of those files
 in the root directory of the Git repository of the source code?
@@ -90,32 +91,280 @@ retrieve data about projects hosted on Clojars:
 + https://github.com/clojars/clojars-web/wiki/Data
 
 After reading the choices available, and looking at the data returned
-by a few of the URLs, I think the one below might be the most useful
-for my purposes, because this file contains URLs for the source code
-of each project:
+by a few of the URLs, the one below seems to be the most useful for my
+purposes, because this file contains URLs for the source code of each
+project:
 
 + http://clojars.org/repo/feed.clj.gz
 
 
-# Data to collect
+# Data collected, and analysis results
 
-Clojars has data on a large fraction of open source Clojure projects.
-While it would be possible to use Github.com APIs to retrieve data on
-Clojure projects that deploy artifacts elsewhere, e.g. Maven central,
-or do not deploy artifacts at all, I will not try to do that yet, and
-perhaps never, in hopes that the Clojars data will be a representative
-sample.
+The goal here is not to guarantee any kind of completeness of Clojure
+projects to analyze, but to have a large sample.
 
-```bash
-$ curl -O http://clojars.org/repo/feed.clj.gz
+The `feed.clj.gz` file I started with I downloaded on 2020-Feb-08.  It
+seemed to work better using a web browser to go to the URL and get the
+file -- for reasons I did not discover, `curl` failed to get the file
+using that URL.
+
+I decompressed the file to get `feed.clj` and did the following in my
+REPL, using the Clojure code in this repository.
+
+First, the steps to read and process the contents of the `feed.clj`
+file, and create a bash script to download many git repositories of
+source code for as many of the projects that we can find a Github URL
+for.
+
+```clojure
+(import '(java.io PushbackReader))
+(require '[clojure.java.io :as io])
+(require '[com.fingerhutpress.haironfire.clojars :as cloj])
+
+(def tmp (let [r1 (PushbackReader. (io/reader "feed.clj"))]
+           (->> r1
+                cloj/read-clojars-feed
+                cloj/summarize-clojars-feed-data)))
+;; `as` is short for 'artifacts'
+(def as (cloj/add-canonical-artifact-ids (:data tmp)))
+(print (:string tmp))
+
+;; 25675 artifacts, where
+;; 25675 remain after removing ones with 'unclean' data, out of which:
+;; 
+;; 18493 (  72.0%) appear to have usable URLs for accessing source code,
+;;   971 (   3.8%) have URLs that are less likely to be usable, and
+;;  6211 (  24.2%) no URL likely to be usable at all was found.
+;; 
+;; 25675 ( 100.0%) have unique (group-id:artifact-id) pair
+;;     0 (   0.0%) have (group-id:artifact-id) pair that is duplicate of another
+;; 
+;; Artifacts partitioned into sets based on what kind of SCM :connection
+;; or :url key was found, or a :url key at the top level of the map:
+;;  2280 (   8.9%) no-scm-and-no-url
+;;   673 (   2.6%) scm-connection-git-but-missing-project-name
+;;     1 (   0.0%) scm-connection-git-not-github
+;;   398 (   1.6%) scm-connection-git-then-non-git
+;; 14769 (  57.5%) scm-connection-github
+;;    99 (   0.4%) scm-connection-http-github-url
+;;    66 (   0.3%) scm-connection-not-git
+;;    12 (   0.0%) scm-connection-not-scm
+;;   915 (   3.6%) scm-no-connection-and-empty-url
+;;  2530 (   9.9%) scm-no-connection-and-github-url
+;;  1543 (   6.0%) scm-no-connection-and-no-url
+;;   101 (   0.4%) scm-no-connection-and-non-github-url
+;;    64 (   0.2%) scm-no-connection-and-yes-url
+;;   195 (   0.8%) url-empty-string
+;;   447 (   1.7%) url-http-example-fixme
+;;  1094 (   4.3%) url-http-or-https-github
+;;   472 (   1.8%) url-http-or-https-not-github
+;;    16 (   0.1%) url-not-httpnil
+
+(count as)
+
+;; The next step writes the file get-artifact-source.sh and is pretty
+;; quick.  If you do this yourself, pick a directory name that does
+;; not exist yet on your system, or is empty.  The bash script will
+;; create it if it does not exist already.
+
+(def repos-dir-abs-path "/home/andy/clj/haironfire/repos")
+(cloj/write-git-clone-bash-script "get-artifact-source.sh" repos-dir-abs-path
+                                  as)
 ```
 
-Strangely enough, using that `curl` command sometimes gives me back a
-short 301 or 302 response rather than the data, whereas that URL seems
-to work fine from a browser like Firefox.  I do not know why.
+When I went through the steps above, here is how the stats came out:
+
++ 25,675 artifacts described in the `feed.clj` file
++ 18,493 of those were categorized as having 'usable URLs'.
+  + The details of that can be found in the code, but basically it
+    means that the code found a URL that looks like a valid Github
+    project URL.
++ 15,154 of those URLs were distinct.
+  + This number is not in the output above -- I ran the command
+    `grep -c 'git clone ' get-artifact-source.sh`
+    on the bash script to find that number.
+  + It seems that many Clojars artifacts have the same Github URL as
+    each other.  I believe this is mostly because some developers use
+    a single source code repository to generate multiple related JAR
+    files.
+
+_Executing_ the bash script `get-artifact-source.sh` can take many
+hours, depending upon your Internet access speed, and the number of
+projects it attempts to get.
+
+When I ran it in 2020-Feb, it took most of one day to run, attempting
+to do 'git clone' on 15,154 URLs.
+
+It created files totaling about about 42 Gbytes of space.  Most of the
+git repositories are pretty small.  The largest 90 of them took half
+of that storage, just over 21 Gbytes.  The remaining (13,386-90) that
+were successfully cloned (see below) took an average of about 1.6
+Mbytes of space each.
+
+Some of those URLs were invalid, probably because they were entered
+incorrectly when the Clojars artifact was created, or they were valid
+when the Clojars artifact was created, but had since been removed.
+
+Once that long step is done, this next bit below tells us how many git
+clones were done successfully.
+
+```clojure
+
+;; Same directory as above, so no reason to def this again if you are
+;; in the same REPL session.
+
+(def repos-dir-abs-path "/home/andy/clj/haironfire/repos")
+(def proj-locs (cloj/projects-retrieved repos-dir-abs-path))
+(def projok (remove :error proj-locs))
+(count projok)
+;; 13386
+```
+
+So of the 15,154 distinct URLs, I was able to successfully download
+13,386 repositories.  I have not checked carefully, but I suspect most
+of the failures were due to wrong URLs entered in the Clojars
+artifact, or they were correct at one time, but have since been
+removed.
+
+Continuing the analysis on those 13,386 repositories, let us divide
+them up into groups, based upon which of the 4 tooling files they have
+in their home directory.
+
+```clojure
+(def projok-grouped (group-by #(into (sorted-set) (keys (:tooling-files %))) projok))
+
+;; I have edited the output of the pprint below, to group things
+;; together as I wish and add a few comments.
+
+(pprint (cloj/group-by->freqs projok-grouped))
+
+;; {
+;;  ;; no deps.edn, but project.clj
+;;  #{"project.clj"} 11509,
+;;  #{"pom.xml" "project.clj"} 181,
+;;  #{"build.boot" "project.clj"} 42,
+;;  #{"build.boot" "pom.xml" "project.clj"} 4,
+;;
+;;  ;; neither deps.edn nor project.clj
+;;  #{"pom.xml"} 137,
+;;  #{"build.boot"} 558,
+;;  #{} 418,
+;;
+;;  ;; deps.edn and project.clj
+;;  #{"deps.edn" "project.clj"} 272,
+;;  #{"deps.edn" "pom.xml" "project.clj"} 14,
+;;  #{"build.boot" "deps.edn" "project.clj"} 2,
+;;  #{"build.boot" "deps.edn" "pom.xml" "project.clj"} 1
+;;
+;;  ;; deps.edn but no project.clj
+;;  #{"deps.edn"} 64,
+;;  #{"deps.edn" "pom.xml"} 157,
+;;  #{"build.boot" "deps.edn"} 23,
+;;  #{"build.boot" "deps.edn" "pom.xml"} 4,
+;; }
+```
+
+"Group 1" projects in `pg1` have no `deps.edn` file, but do have a
+`project.clj` file.
+
+"Group 2" projects in `pg2` have a `deps.edn` file and a `project.clj`
+file.
+
+```clojure
+(def pg1 (filter #(and (contains? (:tooling-files %) "project.clj")
+                       (not (contains? (:tooling-files %) "deps.edn")))
+                 projok))
+(count pg1)
+;; 11736
+
+(def pg2 (filter #(and (contains? (:tooling-files %) "project.clj")
+                       (contains? (:tooling-files %) "deps.edn"))
+                 projok))
+(count pg2)
+;; 289
+
+(def d1 (cloj/categorize-lein-projects pg1))
+(def d2 (cloj/categorize-lein-projects pg2))
+```
+
+For the output below, I am prefixing the expressions I evaluated with
+`user=>`, and _not_ commenting the output, since it is fairly long and
+I do not want to bother commenting it all.
+
+```
+user=> (cloj/print-lein-project-summary d1)
+
+11736 projects analyzed
+10768 (  91.8%) EDN-readable project.clj files with well formed :dependencies (or no :dependencies key)
+  917 (   7.8%) threw exceptions while trying to read as EDN (breakdown 1 below)
+   35 (   0.3%) EDN-readable, but something other than defproject form read first (breakdown 2 below)
+   16 (   0.1%) defproject form first, but :dependencies look ill formed (breakdown 3 below)
+
+Breakdown 1 of reasons for EDN reading of project.clj throwing exception:
+{"No dispatch macro for: \"" 541,
+ "Invalid leading character: ~" 263,
+ "No dispatch macro for: (" 89,
+ "Invalid leading character: `" 7,
+ "No dispatch macro for: =" 6,
+ "No dispatch macro for: '" 3,
+ "Invalid token: ::min-lein-version" 3,
+ "Invalid leading character: @" 2,
+ "Map literal must contain an even number of forms" 1,
+ "Invalid token: ::edge-features" 1,
+ "Invalid token: ::url" 1}
+
+Breakdown 2 of reasons first form doesn't appear to be a defproject:
+{{:error true,
+  :description "List does not start with symbol 'defproject'"}
+ 30,
+ {:error true, :description "Not a list"} 3,
+ {:error true,
+  :description "defproject list must have odd number of elements"}
+ 1,
+ {:error true,
+  :description
+  "defproject list had non-keywords where keyword expected, first beingfavicon"}
+ 1}
+
+Breakdown 3 of reasons defproject :dependencies value looks wrong, or more likely needs examination of :managed-dependencies in this or a different project to interpret:
+{"One :dependencies element was a vector with 1 elements, not at least 2 as expected: [org.clojure/clojure]"
+ 14,
+ "One :dependencies element was a vector with 1 elements, not at least 2 as expected: [puppetlabs/trapperkeeper-webserver-jetty9]"
+ 1,
+ "One :dependencies element was a vector with 1 elements, not at least 2 as expected: [com.fasterxml.jackson.core/jackson-core]"
+ 1}
+nil
 
 
-# Maven SCM strings
+user=> (cloj/print-lein-project-summary d2)
+
+  289 projects analyzed
+  237 (  82.0%) EDN-readable project.clj files with well formed :dependencies (or no :dependencies key)
+   51 (  17.6%) threw exceptions while trying to read as EDN (breakdown 1 below)
+    1 (   0.3%) EDN-readable, but something other than defproject form read first (breakdown 2 below)
+    0 (   0.0%) defproject form first, but :dependencies look ill formed (breakdown 3 below)
+
+Breakdown 1 of reasons for EDN reading of project.clj throwing exception:
+{"No dispatch macro for: \"" 31,
+ "Invalid leading character: ~" 13,
+ "No dispatch macro for: =" 5,
+ "Invalid leading character: @" 1,
+ "No dispatch macro for: (" 1}
+
+Breakdown 2 of reasons first form doesn't appear to be a defproject:
+{{:error true,
+  :description "List does not start with symbol 'defproject'"}
+ 1}
+
+Breakdown 3 of reasons defproject :dependencies value looks wrong, or more likely needs examination of :managed-dependencies in this or a different project to interpret:
+{}
+nil
+```
+
+
+# Things I learned while examining the data
+
+## Maven SCM strings
 
 Strings beginning with `scm:` such as
 `scm:git:ssh://git@github.com/quoll/naga.git` are used as values of
@@ -138,9 +387,6 @@ The providers I have seen used on Clojars are:
 + `svn` - no others begin with `s`
 + No others that start with any letter other than `[bcghs]`.
 
-
-
-# Things I learned while examining the data
 
 ## EDN is a subset of Clojure code in many ways
 

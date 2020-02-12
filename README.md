@@ -137,3 +137,178 @@ The providers I have seen used on Clojars are:
 + `hg` - one begins with `scm:http`, but nothing else begins with `scm:h`
 + `svn` - no others begin with `s`
 + No others that start with any letter other than `[bcghs]`.
+
+
+
+# Things I learned while examining the data
+
+## EDN is a subset of Clojure code in many ways
+
+I already knew this before, but a bit more surprising is one way I had
+never seen or thought of before (see below), and the reminder that
+Clojure regex literals are not part of EDN.  Regex literals are used
+in a noticeable fraction of `project.clj` files, most often as file
+name patterns to include/exclude for some purpose, e.g. selecting
+files to put into, or not put into, a JAR, or to include or exclude
+for generating documentation.
+
+When reading text using `clojure.edn/read`, the single quote character
+`'` is treated as a character that is part of a symbol.  Thus if you
+read Clojure data using `clojure.edn/read` that was written intended
+to be read by the code reading function `clojure.core/read`, as
+Leiningen `project.clj` files are, single quotes that read fine like
+this:
+
+```clojure
+$ clj
+Clojure 1.10.1
+
+;; Most people would not quote a number, but you can do that in
+;; Clojure code, and it will read as an experienced Clojure developer
+;; would expect, expanding '1 into (quote 1), which is a list (type
+;; Cons in this case) of the symbol `quote` and the number `1`.
+
+user=> (def m1 (clojure.core/read-string "{:a '1}"))
+#'user/m1
+
+user=> m1
+{:a (quote 1)}
+
+user=> (m1 :a)
+(quote 1)
+
+user=> (class (m1 :a))
+clojure.lang.Cons
+
+user=> (map class (m1 :a))
+(clojure.lang.Symbol java.lang.Long)
+
+
+;; Something different happens when you read it using EDN reader.
+
+user=> (def m2 (clojure.edn/read-string "{:a '1}"))
+#'user/m2
+
+;; This output certainly looks different than above.
+
+user=> m2
+{:a '1}
+
+user=> (m2 :a)
+'1
+
+;; What is the type of the value in the map?
+
+user=> (class (m2 :a))
+clojure.lang.Symbol
+
+;; A symbol!  That is an odd looking symbol, indeed.  And its name
+;; string include the single quote character!
+
+user=> (name (m2 :a))
+"'1"
+
+
+;; Using a quote with the clojure.core read or read-string function is
+;; more typical than quoting a number.
+
+user=> (clojure.core/read-string "{:a '{:b 2}}")
+{:a (quote {:b 2})}
+
+;; That looks expected.  What about when we read the same string using
+;; the EDN reader?  It treats the ' by itself as symbol with a name
+;; one character long, and separate from the map `{:b 2}` that follows
+;; it, so that the thing that looks like a map around it, has 3 values
+;; between the outer braces, not 2, and is not a legal map.
+
+user=> (clojure.edn/read-string "{:a '{:b 2}}")
+Execution error at user/eval17 (REPL:1).
+Map literal must contain an even number of forms
+```
+
+The good news is that there is code in this project to check, after
+reading a `project.clj` file using `clojure.edn/read`, whether any of
+the dependencies symbols contain a single quote character anywhere in
+the name of the symbol, and 0 of them did.
+
+
+## A `defproject` form can have no `:dependencies` key
+
+As far as I can tell, Leiningen treats this the same as having an
+empty sequence of dependencies.  Almost 1,000 `project.clj` files out
+of 12,000 EDN-readable ones I checked are like this, so it is
+reasonably common.
+
+
+## A `project.clj` `:dependencies` value can be just about anything whose `seq` is a sequence of vectors or lists
+
+Most `project.clj` files have a `:dependencies` key whose value is a
+vector of vectors, like this example:
+
+```clojure
+(defproject useclj110 "0.1.0-SNAPSHOT"
+  :description "FIXME: write description"
+  :dependencies [[org.clojure/clojure "1.10.1"]
+                 ["medley" "1.2.0"]])
+```
+
+But it can also be a list of vectors, a list of lists, a vector of
+lists, or even a Clojure map, which when you call `seq` on it returns
+a sequence of 2-element vectors.  The examples below are equivalent to
+the one above, as far as Leiningen is concerned:
+
+```clojure
+;; :dependencies is a list of vectors
+
+(defproject useclj110 "0.1.0-SNAPSHOT"
+  :description "FIXME: write description"
+  :dependencies ([org.clojure/clojure "1.10.1"]
+                 ["medley" "1.2.0"]))
+
+;; dependencies is a map
+
+(defproject useclj110 "0.1.0-SNAPSHOT"
+  :description "FIXME: write description"
+  :dependencies {org.clojure/clojure "1.10.1"
+                 "medley" "1.2.0"})
+```
+
+
+## Elements of a `:dependencies` value can contain only a symbol, with no version
+
+If you try to give a dependency with a group/artifact id, but no
+version, it is normally an error for Leiningen:
+
+```clojure
+;; This will cause Leiningen to give an error
+
+(defproject useclj110 "0.1.0-SNAPSHOT"
+  :description "FIXME: write description"
+  :dependencies [[org.clojure/clojure]
+                 [medley]])
+```
+
+The `project.clj` file below is legal for Leiningen, and
+`org.clojure/data.priority-map` does _not_ appear in the output of
+`lein deps :tree`, by design.  The output of `lein deps :tree` shows
+the versions of `org.clojure/clojure` and `medley` that appear in the
+value of the `:managed-dependencies` key.
+
+```clojure
+(defproject useclj110 "0.1.0-SNAPSHOT"
+  :description "FIXME: write description"
+  :dependencies [[org.clojure/clojure]
+                 [medley]]
+  :managed-dependencies [[org.clojure/clojure "1.9.0"]
+                         [medley "1.2.0"]
+                         [org.clojure/data.priority-map "0.0.10"]])
+```
+
+I do not now what tools.deps should do with such dependencies,
+especially if they are between multiple projects.  Within a single
+`project.clj` file like above, it may be more straightforward to
+handle.
+
+I only saw 16 out of about 12,000 EDN-readable `project.clj` files
+that had these kinds of dependencies, so perhaps it is best to treat
+these as unusable for the purposes of tools.deps.

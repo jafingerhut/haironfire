@@ -119,6 +119,7 @@ for.
 ```clojure
 (import '(java.io PushbackReader))
 (require '[clojure.java.io :as io])
+(require '[clojure.edn :as edn])
 (require '[com.fingerhutpress.haironfire.clojars :as cloj])
 
 (def edn-read-fn clojure.edn/read)
@@ -291,6 +292,12 @@ file.
 For the output below, I am prefixing the expressions I evaluated with
 `user=>`, and _not_ commenting the output, since it is fairly long and
 I do not want to bother commenting it all.
+
+Note that the most common reason for the EDN reader throwing an
+exception while reading `project.clj` files is the use of regex
+literals.  See [here](README-extended-edn-reader.md) for alternate
+results for a hacked up version of Clojure's `EdnReader` that can read
+regex literals.
 
 ```
 user=> (cloj/print-lein-project-summary d1)

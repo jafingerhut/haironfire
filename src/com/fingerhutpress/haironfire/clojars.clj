@@ -2,6 +2,7 @@
   (:import (java.io PushbackReader))
   (:require [clojure.java.io :as io]
             [clojure.edn :as edn]
+            [clojure.tools.reader.edn :as tredn]
             [clojure.pprint :as pp]
             [clojure.string :as str]
             [medley.core :as med]
@@ -214,15 +215,15 @@
               (= (:artifact-id art-map) (:artifact-id can))))))
 
 (let [sentinel-obj (Object.)]
-  (defn edn-read-all-forms [rdr]
+  (defn edn-read-all-forms [rdr edn-read-fn]
     (loop [forms (transient [])]
-      (let [x (edn/read {:eof sentinel-obj} rdr)]
+      (let [x (edn-read-fn {:eof sentinel-obj} rdr)]
         (if (identical? x sentinel-obj)
           (persistent! forms)
           (recur (conj! forms x)))))))
 
-(defn read-clojars-feed [rdr]
-  (edn-read-all-forms rdr))
+(defn read-clojars-feed [rdr edn-read-fn]
+  (edn-read-all-forms rdr edn-read-fn))
 
 (defn clean-artifact?
   [art-map]
@@ -553,11 +554,12 @@ or :url key was found, or a :url key at the top level of the map:")
 
 (defn project-clj-file-info
   "Given the name of what should be a Leiningen project.clj file,
-  attempt to read all of its forms using clojure.edn/read.  If an
-  exception occurs while trying to do this, e.g. because the file
-  contains some Clojure code constructs that are not valid EDN, return
-  a map with the key :exception where its associated value is the
-  exception that was thrown.
+  attempt to read all of its forms using
+  edn-read-fn (e.g. clojure.edn/read).  If an exception occurs while
+  trying to do this, e.g. because the file contains some Clojure code
+  constructs that are not valid EDN, return a map with the
+  key :exception where its associated value is the exception that was
+  thrown.
 
   If no exception is thrown while reading it, return a map with
   no :exception key, but instead has the following keys and
@@ -575,10 +577,10 @@ or :url key was found, or a :url key at the top level of the map:")
   called on the first form read from the file, or {:error
   true :decription \"No forms found\"} if no values were found in the
   file."
-  [fname]
+  [fname edn-read-fn]
   (with-open [rdr (PushbackReader. (io/reader fname))]
     (let [[exc forms] (try
-                        [nil (edn-read-all-forms rdr)]
+                        [nil (edn-read-all-forms rdr edn-read-fn)]
                         (catch Exception e
                           [e nil]))
           ret (cond
@@ -682,10 +684,11 @@ or :url key was found, or a :url key at the top level of the map:")
       ;; common one.
       {:error false})))
 
-(defn categorize-lein-projects [project-maps]
+(defn categorize-lein-projects [project-maps edn-read-fn]
   (let [project-clj-fnames (map #(:path ((:tooling-files %) "project.clj"))
                                 project-maps)
-        projinfos (mapv project-clj-file-info project-clj-fnames)
+        projinfos (mapv #(project-clj-file-info % edn-read-fn)
+                        project-clj-fnames)
         ;; Divide them into ones that caused exceptions while reading
         ;; the project.clj file (excs), those that had a defproject
         ;; form that looks good first in the file (ok), and those that
@@ -761,6 +764,7 @@ or :url key was found, or a :url key at the top level of the map:")
 (import '(java.io PushbackReader))
 (require '[clojure.java.io :as io])
 (require '[clojure.edn :as edn])
+(require '[clojure.tools.reader.edn :as tredn])
 (require '[clojure.set :as set])
 (require '[clojure.string :as str])
 (require '[com.fingerhutpress.haironfire.clojars :as cloj] :reload)
@@ -788,10 +792,12 @@ or :url key was found, or a :url key at the top level of the map:")
 ;; use a command like `ungzip feed.clj.gz` to create the uncompressed
 ;; text file feed.clj
 
+(def edn-read-fn clojure.edn/read)
+#_(def edn-read-fn clojure.tools.reader.edn/read)
 (def tmp (let [r1 (PushbackReader. (io/reader "feed.clj"))]
-           (->> r1
-                cloj/read-clojars-feed
-                cloj/summarize-clojars-feed-data)))
+           (-> r1
+               (cloj/read-clojars-feed edn-read-fn)
+               cloj/summarize-clojars-feed-data)))
 ;; `as` is short for 'artifacts'
 (def as (cloj/add-canonical-artifact-ids (:data tmp)))
 (print (:string tmp))
@@ -891,16 +897,35 @@ or :url key was found, or a :url key at the top level of the map:")
 (def proj-group pg1)
 (def proj-group pg2)
 
-(def d (cloj/categorize-lein-projects proj-group))
-(cloj/print-lein-project-summary d)
+(def edn-read-fn clojure.edn/read)
+(def d1 (cloj/categorize-lein-projects pg1 edn-read-fn))
+(def d2 (cloj/categorize-lein-projects pg2 edn-read-fn))
+(cloj/print-lein-project-summary d1)
+(cloj/print-lein-project-summary d2)
 
+;; There are definitely some differences in results between reading
+;; using clojure.edn/read vs. clojure.tools.reader.edn/read.  These
+;; differences could very well all be "works as designed slightly
+;; differently" for clojure.tools.reader.edn/read, since we are
+;; semi-abusing it by giving it files not meant to be legal EDN.  TBD:
+;; Try to look for any unexpected or surprising differences in
+;; behavior here, perhaps starting with just looking at differences in
+;; the return value of the data read alone, without any follow-on
+;; processing.
+
+#_(def d1b (cloj/categorize-lein-projects pg1 clojure.tools.reader.edn/read))
+#_(def d2b (cloj/categorize-lein-projects pg2 clojure.tools.reader.edn/read))
+#_(= d1 d1b)
+#_(= d2 d2b)
+(cloj/print-lein-project-summary d1b)
+(cloj/print-lein-project-summary d2b)
 
 
 (count project-clj-fnames)
 ;; pg1 11736   pg2 289
 (pprint (take 5 project-clj-fnames))
 
-(def projinfos (mapv cloj/project-clj-file-info project-clj-fnames))
+(def projinfos (mapv cloj/project-clj-file-info project-clj-fnames edn-read-fn))
 (def excs (filter :exception projinfos))
 (def ok (filter :first-form-defproject? projinfos))
 (def bad (filter #(false? (:first-form-defproject? %)) projinfos))

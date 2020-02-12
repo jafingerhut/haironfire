@@ -121,10 +121,11 @@ for.
 (require '[clojure.java.io :as io])
 (require '[com.fingerhutpress.haironfire.clojars :as cloj])
 
+(def edn-read-fn clojure.edn/read)
 (def tmp (let [r1 (PushbackReader. (io/reader "feed.clj"))]
-           (->> r1
-                cloj/read-clojars-feed
-                cloj/summarize-clojars-feed-data)))
+           (-> r1
+               (cloj/read-clojars-feed edn-read-fn)
+               cloj/summarize-clojars-feed-data)))
 ;; `as` is short for 'artifacts'
 (def as (cloj/add-canonical-artifact-ids (:data tmp)))
 (print (:string tmp))
@@ -283,8 +284,8 @@ file.
 (count pg2)
 ;; 289
 
-(def d1 (cloj/categorize-lein-projects pg1))
-(def d2 (cloj/categorize-lein-projects pg2))
+(def d1 (cloj/categorize-lein-projects pg1 edn-read-fn))
+(def d2 (cloj/categorize-lein-projects pg2 edn-read-fn))
 ```
 
 For the output below, I am prefixing the expressions I evaluated with

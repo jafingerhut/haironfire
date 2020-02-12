@@ -7,6 +7,8 @@
             [medley.core :as med]
             [clojure.data.priority-map :as pm]))
 
+(set! *warn-on-reflection* true)
+
 (defn duplicates
   "Return a map similar to (frequencies coll), except it only contains
   keys equal to values that occur at least twice in coll."
@@ -336,6 +338,155 @@ or :url key was found, or a :url key at the top level of the map:")
                      " :artifact-id"
                      (:artifact-id (:canonical-artifact art-map)))))))))
 
+(defn file-properties [^java.io.File f]
+  {:file f
+   ;; full path name of file as string
+   :path (. f (getPath))
+   ;; base name (i.e. last component of full path name, without any of
+   ;; the containing directory names.
+   :name (. f (getName))
+   :directory? (. f (isDirectory))
+   :regular? (. f (isFile))})
+
+(defn files-in-directory
+  "Returns a sequence of java.io.File objects for all files directly
+  inside of the directory `dir`, without looking for files within any
+  subdirectories.  On Linux, does not return any elements for the
+  special directories '.' or '..'"
+  [^java.io.File dir]
+  (seq (. dir (listFiles))))
+
+(defn exit-status-from-file
+  "Given a java.io.File f, open it for reading and read the first
+  line.  If it contains nothing but a consecutive sequence of decimal
+  digits, with optional leading and trailing white space, convert that
+  to a number and return it.  Otherwise return nil.  Throws exception
+  if the file does not exist, or cannot be opened for reading."
+  [^java.io.File f]
+  (with-open [rdr (io/reader f)]
+    (let [line1 (first (line-seq rdr))
+          [match? digit-str] (if line1 (re-matches #"\s*(\d+)\s*" line1))]
+      (if match?
+        (Long/parseLong digit-str)))))
+
+(defn find-regular-files
+  "Given a set of base file names as strings (i.e. without any path),
+  and a sequence of maps with file properties, e.g. perhaps one
+  returned by the function file-properties, return a map where the
+  keys are a subset of name-set, and the corresponding values are
+  sequences containing the elements of file-props-seq for all regular
+  files in file-props-seq that have that base name."
+  [name-set file-props-seq]
+  (dissoc (group-by (fn reg-file-with-name [file-props]
+                      (if (:regular? file-props)
+                        (if-let [fname (name-set (:name file-props))]
+                          fname)))
+                    file-props-seq)
+          nil))
+
+(defn one-project-retrieved-info
+  "Given a directory `one-repo-dir`, check that it appears to have
+  been created by a bash script as created by the function
+  write-git-clone-bash-script, for one Clojars artifact, with source
+  code retrieved from a single git repository.
+
+  Such a directory should have at least one regular file named
+  `exit_status.txt`, readable, containing a single decimal integer in
+  ASCII, which is the exit status of a 'git clone' command executed
+  earlier from the directory containing that file.
+
+  It should also contain a url.txt regular file, but we will ignore
+  that here.
+
+  There should also be exactly one directory, which the 'git clone'
+  command created if it was successful.  That directory should contain
+  a directory named `.git`, and one should be able to successfully run
+  a `git status .` command in there, or most other git commands that
+  only read the file system, without any errors.
+
+  The return value is a map that always contains the keys:
+
+  :repo-dir java.io.File that is the argument `one-repo-dir`
+
+  :group-id - string containing the group-id part of the directory
+  name, before the colon character.
+
+  :artifact-id - string containing the artifact-id part of the
+  directory name, after the colon character.
+
+  :error - see below
+
+  If any of the things described above are not true, return a map with
+  key :error having the value `true`, and a key :description whose
+  value is a string describing the problem found.
+
+  If all of the things described above are true, return a map with
+  key :error having the value `false`.
+
+  The map will also contain a key :tooling-files whose value is a map
+  as described below.
+
+  Check if the root directory of the git clone contains any or all of
+  files with these names.  The map describing them has strings of the
+  file names that are present as keys, where the corresponding values
+  containing information about that file as returned by the function
+  `file-properties`.
+
+      project.clj pom.xml build.boot deps.edn"
+  [^java.io.File one-repo-dir]
+  (let [file-props (map file-properties (files-in-directory one-repo-dir))
+        exit-status-files (filter #(= "exit_status.txt" (:name %)) file-props)
+        dirs (filter :directory? file-props)
+        one-repo-dir-name (:name (file-properties one-repo-dir))
+        [group-id artifact-id] (str/split one-repo-dir-name #":")
+        ret-map {:repo-dir one-repo-dir,
+                 :group-id group-id
+                 :artifact-id artifact-id}]
+    (cond
+      (not= 1 (count exit-status-files))
+      (merge ret-map
+             {:error true,
+              :description "Should be exactly 1 file named exit_status.txt"})
+
+      (not= 1 (count dirs))
+      (merge ret-map {:error true,
+                      :description "Should be exactly 1 sub-directory"})
+
+      :else
+      (let [exit-status-file (first exit-status-files)
+            exit-status (exit-status-from-file (:file exit-status-file))]
+        (if-not (zero? exit-status)
+          (merge ret-map {:error true,
+                          :description
+                          (str "File exit_status.txt should contain"
+                               " number 0 but found " exit-status)})
+          ;; else exist-status is 0
+          (let [root-dir (:file (first dirs))
+                root-dir-files (map file-properties
+                                    (files-in-directory root-dir))
+                dot-git-dirs (filter #(and (:directory? %) (= ".git" (:name %)))
+                                     root-dir-files)
+                fname-set #{"project.clj" "pom.xml" "build.boot" "deps.edn"}
+                reg-files (find-regular-files fname-set root-dir-files)]
+            (cond
+              (not= 1 (count dot-git-dirs))
+              (merge ret-map
+                     {:error true,
+                      :description (str "git clone directory should contain"
+                                        " exactly 1 directory named .git")})
+
+              (some #(> (count (reg-files %)) 1) fname-set)
+              (merge ret-map
+                     {:error true,
+                      :description (str "git clone directory contained more"
+                                        " than 1 file with name: "
+                                        (str/join ", " (seq fname-set)))})
+
+              :else
+              (merge ret-map
+                     {:error false,
+                      :tooling-files (med/map-vals first reg-files)}))))))))
+
 (defn defproject-form?
   "Return {:error false :data d} if `form` appears to be a Leiningen
   defproject form, where d is a Clojure map.  The keys of d are the
@@ -571,8 +722,8 @@ or :url key was found, or a :url key at the top level of the map:")
 
 ;; The next step writes the file get-artifact-source.sh and is pretty
 ;; quick.
-(cloj/write-git-clone-bash-script "get-artifact-source.sh"
-                                  "/home/andy/clj/haironfire/repos"
+(def repos-dir-abs-path "/home/andy/clj/haironfire/repos")
+(cloj/write-git-clone-bash-script "get-artifact-source.sh" repos-dir-abs-path
                                   as)
 
 ;; _Executing_ the bash script get-artifact-source.sh can take many
@@ -615,6 +766,32 @@ or :url key was found, or a :url key at the top level of the map:")
 ;; are also pretty quick to complete, and read only a small subset of
 ;; the files that were created on the file system while executing that
 ;; script.
+
+
+;; Assuming the kinds of files left behind by the
+;; get-artifact-source.sh script, collect a list of successfully
+;; retrieved projects, and for each one, which of them have the
+;; following file names in their root directories:
+
+;; project.clj pom.xml build.boot deps.edn
+
+#_(def repos-dir-abs-path "/home/andy/clj/haironfire/repos")
+#_(def repos-dir-abs-path "/home/andy/clj/haironfire/repos-small-test")
+
+;; TBD: write projects-retrieved
+(def proj-locs (projects-retrieved repos-dir-abs-path))
+
+(def repos-dir (java.io.File. repos-dir-abs-path))
+repos-dir
+(def repo-dirs (cloj/files-in-directory repos-dir))
+(pprint repo-dirs)
+(class (nth repo-dirs 0))
+(pprint (cloj/one-project-retrieved-info (nth repo-dirs 0)))
+(pprint (cloj/one-project-retrieved-info (nth repo-dirs 1)))
+(pprint (cloj/one-project-retrieved-info (nth repo-dirs 2)))
+(pprint (cloj/one-project-retrieved-info (nth repo-dirs 3)))
+(pprint (cloj/one-project-retrieved-info (nth repo-dirs 4)))
+
 
 ;; cd haironfire root dir, then:
 ;; /bin/ls repos/*/*/project.clj > locs-project.clj-files.txt

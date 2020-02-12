@@ -1,9 +1,11 @@
 (ns com.fingerhutpress.haironfire.clojars
+  (:import (java.io PushbackReader))
   (:require [clojure.java.io :as io]
             [clojure.edn :as edn]
             [clojure.pprint :as pp]
             [clojure.string :as str]
-            [medley.core :as med]))
+            [medley.core :as med]
+            [clojure.data.priority-map :as pm]))
 
 (defn duplicates
   "Return a map similar to (frequencies coll), except it only contains
@@ -11,6 +13,21 @@
   [coll]
   (->> (frequencies coll)
        (med/filter-vals #(> %1 1))))
+
+(defn reverse-cmp [a b]
+  (compare b a))
+
+(defn group-by->freqs
+  "Given a map that is similar to the return value of group-by,
+  i.e. it is a map, where the values are sequences of values
+  associated with that key, return a map with the same keys, where the
+  values are the lengths of the sequences in the input map.  The
+  returned map is a priority-map, where key/value pairs are sorted by
+  counts, from largest count to smallest count, which makes it nicer
+  for printing the value and seeing the most common keys first."
+  [group-by-result-map]
+  (into (pm/priority-map-by reverse-cmp)
+        (med/map-vals count group-by-result-map)))
 
 (defn http-url-string? [string]
   (or (str/starts-with? string "http://")
@@ -194,13 +211,16 @@
          (and (= (:group-id art-map) (:group-id can))
               (= (:artifact-id art-map) (:artifact-id can))))))
 
-(defn read-clojars-feed [rdr]
-  (let [sentinel-obj (Object.)]
-    (loop [artifacts (transient [])]
+(let [sentinel-obj (Object.)]
+  (defn edn-read-all-forms [rdr]
+    (loop [forms (transient [])]
       (let [x (edn/read {:eof sentinel-obj} rdr)]
         (if (identical? x sentinel-obj)
-          (persistent! artifacts)
-          (recur (conj! artifacts x)))))))
+          (persistent! forms)
+          (recur (conj! forms x)))))))
+
+(defn read-clojars-feed [rdr]
+  (edn-read-all-forms rdr))
 
 (defn clean-artifact?
   [art-map]
@@ -316,6 +336,196 @@ or :url key was found, or a :url key at the top level of the map:")
                      " :artifact-id"
                      (:artifact-id (:canonical-artifact art-map)))))))))
 
+(defn defproject-form?
+  "Return {:error false :data d} if `form` appears to be a Leiningen
+  defproject form, where d is a Clojure map.  The keys of d are the
+  (nth form 3), (nth form 5), etc. elements of the list `form`.  The
+  value associated with key (nth form 3) is (nth form 4), the value
+  associated with the key (nth form 5) is (nth form 6), etc.
+
+  Return {:error true, :description msg} if something is found that
+  makes `form` appear not to be a defproject form, where `msg` is a
+  string describing the issue."
+  [form]
+  (cond
+    ;; Note: in the ~12,000 project.clj files I have downloaded to
+    ;; check, there are 3 that clojure.edn/read can read without
+    ;; throwing an exception, that fail this check for the _first_
+    ;; form read from the file, because they contain what looks like a
+    ;; spurious "1" or "=" character before the "(defproject ...)"
+    ;; form.  Fun!  This doesn't seem to bother Leiningen, because it
+    ;; reads and evals all forms in the file, and = and 1 are both
+    ;; valid Clojure forms that evaluate with no errors, and have no
+    ;; side effects when evaluating them.
+    (not (list? form))
+    {:error true, :description "Not a list"}
+    
+    (not= 'defproject (first form))
+    {:error true, :description "List does not start with symbol 'defproject'"}
+
+    (< (count form) 3)
+    {:error true, :description "defproject list has fewer than 3 elements"}
+
+    (not (symbol? (nth form 1)))
+    {:error true, :description "defproject list second element should be symbol"}
+
+    ;; Commenting this out, because I found 28 projects that have a
+    ;; project.clj file where instead of a string, there was a Clojure
+    ;; form that evaluated to a version string, used by the project
+    ;; maintainer to get a version string from an environment variable
+    ;; in many cases.  As long as we do not need the actual version
+    ;; string, there is no need to exclude such project.clj files for
+    ;; my purposes here.
+    ;;(not (string? (nth form 2)))
+    ;;{:error true, :description "defproject list third element should be string"}
+    
+    (even? (count form))
+    {:error true, :description "defproject list must have odd number of elements"}
+
+    :else
+    (let [ks (take-nth 2 (drop 3 form))
+          vs (take-nth 2 (drop 4 form))
+          non-keywords (remove keyword? ks)]
+      (cond
+        (seq non-keywords)
+        {:error true,
+         :description (str "defproject list had non-keywords where keyword"
+                           " expected, first being" (first non-keywords))}
+        
+        :else
+        {:error false, :data (zipmap ks vs)}))))
+
+(defn project-clj-file-info
+  "Given the name of what should be a Leiningen project.clj file,
+  attempt to read all of its forms using clojure.edn/read.  If an
+  exception occurs while trying to do this, e.g. because the file
+  contains some Clojure code constructs that are not valid EDN, return
+  a map with the key :exception where its associated value is the
+  exception that was thrown.
+
+  If no exception is thrown while reading it, return a map with
+  no :exception key, but instead has the following keys and
+  corresponding values:
+
+  :forms - A vector containing the sequence of values read from the
+  file.
+
+  :first-form-defproject? - true if at least one form was read, and
+  the first form appears to be a Leiningen defproject form, according
+  to the return value of the function defproject-form?  Otherwise
+  false.
+
+  :defproject-form-info - A map as returned by defproject-form? when
+  called on the first form read from the file, or {:error
+  true :decription \"No forms found\"} if no values were found in the
+  file."
+  [fname]
+  (with-open [rdr (PushbackReader. (io/reader fname))]
+    (let [[exc forms] (try
+                        [nil (edn-read-all-forms rdr)]
+                        (catch Exception e
+                          [e nil]))
+          ret (cond
+                exc nil
+                (zero? (count forms)) {:error true,
+                                       :description "No forms found"}
+                :else (defproject-form? (first forms)))
+          first-form-defproject? (if exc false (not (:error ret)))]
+      (if exc
+        {:filename fname
+         :exception exc}
+        ;; else
+        {:filename fname
+         :forms forms
+         :first-form-defproject? first-form-defproject?
+         :defproject-form-info ret}))))
+
+(defn my-exc-cause [projinfo]
+  (:cause (Throwable->map (:exception projinfo))))
+
+(defn good-one-lein-dep? [one-dep-vec]
+  (cond
+    (< (count one-dep-vec) 2)
+    {:error true,
+     :description (str "One :dependencies element was a vector with "
+                       (count one-dep-vec) " elements, not at least 2 as expected: "
+                       one-dep-vec)}
+
+    (not (symbol? (one-dep-vec 0)))
+    {:error true,
+     :description (str "One :dependencies element was a vector with "
+                       "a non-symbol " (one-dep-vec 0) " as first element,"
+                       " with type " (class (one-dep-vec 0)))}
+
+    (not (string? (one-dep-vec 1)))
+    {:error true,
+     :description (str "One :dependencies element was a vector with "
+                       "a non-string " (one-dep-vec 1) " as second element,"
+                       " with type " (class (one-dep-vec 1)))}
+    
+    (str/includes? (name (one-dep-vec 0)) "'")
+    {:error true,
+     :description (str "One :dependencies element was a vector with "
+                       "a symbol " (one-dep-vec 0) " as first element,"
+                       " containing a ' character in it, which is highly"
+                       " suspect given we are reading project.clj files using"
+                       " clojure.edn/read")}
+    
+    :else
+    {:error false}))
+
+(comment
+
+(def sym1 (symbol "foo'bar"))
+(name sym1)
+(str/includes? (name sym1) "'")
+
+(good-one-lein-dep? [])
+(good-one-lein-dep? [1])
+(good-one-lein-dep? [1 2])
+(good-one-lein-dep? ['a 2])
+(good-one-lein-dep? ['a "foo"])
+(good-one-lein-dep? ['a'b "foo"])
+(good-one-lein-dep? [(clojure.edn/read-string "'ab") "foo"])
+
+)
+
+(defn good-lein-deps? [defproject-form-info]
+  (assert (false? (:error defproject-form-info)))
+  (let [d (:data defproject-form-info)]
+    (if (contains? d :dependencies)
+      (let [deps (:dependencies d)]
+        (cond
+          ;; It is a vector in most project.clj files, but I have seen
+          ;; a handful that use a list of vectors, or a map.  It seems
+          ;; that as long as when you call seq on it, you get back a
+          ;; sequnce of vectors (including MapEntry for seq'ing over a
+          ;; map), Leiningen works with it.
+          (not (or (vector? deps) (list? deps) (map? deps)))
+          {:error true
+           :description (str ":dependencies value is neither a vector,"
+                             " a list, nor a map")}
+
+          (not (every? vector? deps))
+          {:error true
+           :description ":dependencies value elements not all vectors"}
+
+          :else
+          (let [dep-problems (->> deps
+                                  (map good-one-lein-dep?)
+                                  (remove #(= {:error false} %)))]
+            (if (first dep-problems)
+              (first dep-problems)
+              {:error false}))))
+      ;; else no :dependencies key in defproject form.  As far as I
+      ;; can tell, this is functionally equivalent to having an empty
+      ;; list of dependencies, and is perfectly OK.  I found almost
+      ;; 1,000 project.clj files out of 12,000 that had no top
+      ;; level :dependencies key.  Many of them did have one or more
+      ;; profiles with :dependencies keys, the :dev profile being a
+      ;; common one.
+      {:error false})))
+
 
 (comment
 
@@ -327,21 +537,205 @@ or :url key was found, or a :url key at the top level of the map:")
 (require '[clojure.string :as str])
 (require '[com.fingerhutpress.haironfire.clojars :as cloj] :reload)
 (require '[medley.core :as med])
+(require '[clojure.data.priority-map :as pm])
 )
 ;; end of do
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BEGIN HERE
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; ... if you want to do the data collection and analysis from
+;; scratch.
+
+;; Use a web browser to download a copy of this file.  I say use a web
+;; browser, because I could not figure out how to get the data back
+;; using the `curl` command -- I only got back a redirect or error
+;; response, but I got data about approximately 25,000 Clojars
+;; artifacts in 2020-Feb when I used a web browser.
+
+;; http://clojars.org/repo/feed.clj.gz
+
+;; If your web browser does not automatically uncompress it for you,
+;; use a command like `ungzip feed.clj.gz` to create the uncompressed
+;; text file feed.clj
 
 (def tmp (let [r1 (PushbackReader. (io/reader "feed.clj"))]
            (->> r1
                 cloj/read-clojars-feed
                 cloj/summarize-clojars-feed-data)))
-;; as is short for 'artifacts'
+;; `as` is short for 'artifacts'
 (def as (cloj/add-canonical-artifact-ids (:data tmp)))
 (print (:string tmp))
 (count as)
 
-(cloj/write-git-clone-bash-script "get-artifact-source2.sh"
+;; The next step writes the file get-artifact-source.sh and is pretty
+;; quick.
+(cloj/write-git-clone-bash-script "get-artifact-source.sh"
                                   "/home/andy/clj/haironfire/repos"
                                   as)
+
+;; _Executing_ the bash script get-artifact-source.sh can take many
+;; hours, depending upon your Internet access speed, and the number of
+;; projects it attempts to get.
+
+;; When I ran it in 2020-Feb, it took most of one day to run,
+;; attempting to do 'git clone' on 15,154 URLs.
+
+;; It created files totaling about about 42 Gbytes of space.  Most of
+;; the git repositories are pretty small.  The largest 90 of them took
+;; just over half of that storage, just over 21 Gbytes.  The
+;; remaining (13,386-90) that were successfully cloned (see below)
+;; took an average of about 1.6 Mbytes of space each.
+
+;; Some of those URLs were invalid, probably because they were entered
+;; incorrectly when the Clojars artifact was created, or they were
+;; valid when the Clojars artifact was created, but had since been
+;; removed.
+
+;; Of the 15,154 attempted:
+;; + 1,768 'git clone' commands gave a non-0 exit status, indicating
+;;   some kind of failure.
+;; + 13,386 returned a 0 exit status, for success.
+
+;; Of the 13,386 that succeeded:
+
+;; + 12,078 contained a file project.clj in the root directory
+;; +    541 contained a file deps.edn    in the root directory
+;; +    635 contained a file build.boot  in the root directory
+;; +    500 contained a file pom.xml     in the root directory
+
+;; Some of those directories contained more than one of those files.
+;; I will write code to calculate how many project had each of the 2^4
+;; possible combinations of those file present/absent.
+
+
+
+;; After downloading is complete, almost all of the remaining steps
+;; are also pretty quick to complete, and read only a small subset of
+;; the files that were created on the file system while executing that
+;; script.
+
+;; cd haironfire root dir, then:
+;; /bin/ls repos/*/*/project.clj > locs-project.clj-files.txt
+
+(def project-clj-fnames (vec (line-seq (io/reader "locs-project.clj-files.txt"))))
+(count project-clj-fnames)
+(pprint (take 5 project-clj-fnames))
+
+(def projinfos (mapv cloj/project-clj-file-info project-clj-fnames))
+(def excs (filter :exception projinfos))
+(def ok (filter :first-form-defproject? projinfos))
+(def bad (filter #(false? (:first-form-defproject? %)) projinfos))
+(count projinfos)
+;; 12078
+(count excs)
+;; 975
+(count ok)
+;; 11064
+(count bad)
+;; 39
+
+;; This issue scares me a bit, in that it makes me wonder whether
+;; symbols in extracted dependencies might have ' characters in them
+;; when they should not.  TBD: I should be able to automate a check of
+;; all symbols in all :dependencies values EDN-readable project.clj
+;; files to see if they contain any ' characters in their names, and
+;; flag those for closer attention.
+
+(with-open [wrtr (io/writer "tmp.clj")]
+  (binding [*out* wrtr]
+    (doseq [pi ok]
+      (pr (first (:forms pi)))
+      (println ";;" (:filename pi)))))
+
+(def gexcs (group-by cloj/my-exc-cause excs))
+(pprint (cloj/group-by->freqs gexcs))
+;; {"No dispatch macro for: \"" 577,
+;;  "Invalid leading character: ~" 278,
+;;  "No dispatch macro for: (" 90,
+;;  "No dispatch macro for: =" 11,
+;;  "Invalid leading character: `" 7,
+;;  "Invalid leading character: @" 3,
+;;  "No dispatch macro for: '" 3,
+;;  "Invalid token: ::min-lein-version" 3,
+;;  "Map literal must contain an even number of forms" 1,
+;;  "Invalid token: ::edge-features" 1,
+;;  "Invalid token: ::url" 1
+;; }
+
+;; Examples of, and common reasons for, "No dispatch macro for: \"":
+;; All of them are regexes, of course.  _Why_ the regexes are useful
+;; in project.clj files is the reason for extra details here.
+
+;; :jar-exclusions [#"^migrations/"]    ;; 335 files with :jar-exclusions found
+;; :jar-inclusions
+;; :uberjar-exclusions ; 23
+;; :aot
+
+;; documentation generation tool config for tools like:
+;; :cljfmt - 26 occurrences
+;; :codox - 19 occurrences
+;; :autodoc - at least 1, but not on same line as regex so harder to grep for
+;; e.g.
+;; :autodoc {:load-except-list [#"internal"]}
+
+;; other keywords whose values some people have used regex values,
+;; some of them perhaps nested, i.e. not at the top level of the
+;; defproject:
+
+;; :auth
+;; :exclude
+;; :load-except-list
+;; :namespaces
+;; :ns-exclude-regex
+;; :test-matcher
+
+(pprint (gexcs "Map literal must contain an even number of forms"))
+(pprint (gexcs "No dispatch macro for: ="))
+(pprint (gexcs "Invalid leading character: @"))
+(pprint (take 15 (gexcs "No dispatch macro for: \"")))
+
+(pprint (nth ok 0))
+(pprint (nth bad 0))
+
+(def badbyreason (group-by :defproject-form-info bad))
+(count badbyreason)
+(pprint (keys badbyreason))
+(pprint (cloj/group-by->freqs badbyreason))
+;; {{:error true, :description "List does not start with symbol 'defproject'"}
+;; 34,
+;; {:error true, :description "Not a list"}
+;; 3,
+;; {:error true, :description "defproject list had non-keywords where keyword expected, first beingfavicon"}
+;; 1,
+;; {:error true, :description "defproject list must have odd number of elements"}
+;; 1
+;; }
+(def tmperr {:error true, :description "defproject list had non-keywords where keyword expected, first beingfavicon"})
+(def tmperr {:error true, :description "Not a list"})
+(pprint (take 5 (badbyreason tmperr)))
+
+
+(pprint (nth ok 0))
+(def okdeps (map (fn [pi]
+                   (assoc pi :dependencies-check (cloj/good-lein-deps?
+                                                  (:defproject-form-info pi))))
+                 ok))
+(pprint (nth okdeps 0))
+
+(count okdeps)
+(def ok-okdeps (filter #(false? (get-in % [:dependencies-check :error])) okdeps))
+(def ok-baddeps (filter #(true? (get-in % [:dependencies-check :error])) okdeps))
+(count ok-okdeps)
+(count ok-baddeps)
+
+(def ok-baddeps-grps (group-by #(get-in % [:dependencies-check :description]) ok-baddeps))
+(count ok-baddeps-grps)
+(pprint (cloj/group-by->freqs ok-baddeps-grps))
+(pprint ok-baddeps)
+
+
 
 
 (count as)

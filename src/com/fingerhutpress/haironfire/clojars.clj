@@ -2,7 +2,6 @@
   (:import (java.io PushbackReader))
   (:require [clojure.java.io :as io]
             [clojure.edn :as edn]
-            [clojure.tools.reader.edn :as tredn]
             [clojure.pprint :as pp]
             [clojure.string :as str]
             [medley.core :as med]
@@ -764,7 +763,6 @@ or :url key was found, or a :url key at the top level of the map:")
 (import '(java.io PushbackReader))
 (require '[clojure.java.io :as io])
 (require '[clojure.edn :as edn])
-(require '[clojure.tools.reader.edn :as tredn])
 (require '[clojure.set :as set])
 (require '[clojure.string :as str])
 (require '[com.fingerhutpress.haironfire.clojars :as cloj] :reload)

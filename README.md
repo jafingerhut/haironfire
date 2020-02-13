@@ -203,15 +203,10 @@ of that storage, just over 21 Gbytes.  The remaining (13,386-90) that
 were successfully cloned (see below) took an average of about 1.6
 Mbytes of space each.
 
-Some of those URLs were invalid, probably because they were entered
-incorrectly when the Clojars artifact was created, or they were valid
-when the Clojars artifact was created, but had since been removed.
-
 Once that long step is done, this next bit below tells us how many git
 clones were done successfully.
 
 ```clojure
-
 ;; Same directory as above, so no reason to def this again if you are
 ;; in the same REPL session.
 
@@ -371,6 +366,59 @@ nil
 
 
 # Things I learned while examining the data
+
+## Some Leiningen projects can depend upon multiple files and/or tools to determine the actual dependencies
+
+I have not done any kind of significant learning on this myself, and
+am not currently motivated to do so, other than to record a few hints
+at things one would have to learn more about if you wanted to
+accurately calculate dependencies of a Leiningen project in a very
+fraction of the cases that approaches or exceeds 99%.
+
+Note these numbers of git projects I downloaded in the results above
+that contain _no_ `project.clj` file in the root directory:
+
+```
+;;  ;; neither deps.edn nor project.clj
+;;  #{"pom.xml"} 137,
+;;  #{"build.boot"} 558,
+;;  #{} 418,
+```
+
+That is 1,113 projects, about 10% of the total.  I have not tried to
+collect any further statistics about them, but I have quickly done
+some calculations of how many of all 13,386 repositories have a file
+named `project.clj` not in the root directory, but in a subdirectory.
+
+```
+$ find repos -name 'project.clj' | egrep -v '^repos/[^/]*/[^/]*/project.clj$' | wc -l
+3138
+```
+
+Those 3,138 `project.clj` files include some that I know are for
+testing purposes, e.g. the eastwood project is one that I personally
+checked in copies of project.clj files for other projects that I was
+testing the Eastwood linter on, and they otherwise have nothing to do
+with the Eastwood code itself.  There may be other repositories that
+include them for similar testing/development purposes.  I have not
+tried to determine the purpose of all of them, nor whether they use
+techniques like `lein-modules` to calculate their dependencies.
+
++ https://github.com/jcrossley3/lein-modules
+
+Some Leiningen projects are explicitly constructed to have a master
+directory, with multiple sub-projects.
+
+Here are some other Leiningen plugins or similar kinds of add-on
+software, at least some of which work by augmenting or otherwise
+modifying the value that appears as the `:dependencies` key in the
+`project.clj` file.  I do not know how commonly used any of these
+might be.
+
++ https://github.com/reifyhealth/lein-git-down
++ https://github.com/RickMoynihan/lein-tools-deps
++ https://github.com/tobyhede/lein-git-deps
+
 
 ## Maven SCM strings
 

@@ -419,6 +419,25 @@ might be.
 + https://github.com/RickMoynihan/lein-tools-deps
 + https://github.com/tobyhede/lein-git-deps
 
+Some notes from Colin Fleming, creator of the
+[Cursive](https://cursive-ide.com) Clojure development environment,
+written in 2020-Feb discussion:
+
+    Yes, Cursive has some horrendous black magic to be able to handle
+    as many cases as possible. Integrating lein was the hardest thing
+    I think I've done, or at least the most frustrating.
+
+    I think the other problem is that you also can't read project.clj
+    files without evaluating plugins.  In particular, projects using
+    things like lein-modules will probably read as EDN but won’t
+    contain correct information.
+
+    I think you would need to read the project as EDN, then if you get
+    no errors read the project by calling into lein, and compare those
+    results.
+
+    https://github.com/jcrossley3/lein-modules
+
 
 ## Maven SCM strings
 

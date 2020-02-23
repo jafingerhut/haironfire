@@ -103,10 +103,11 @@ project:
 The goal here is not to guarantee any kind of completeness of Clojure
 projects to analyze, but to have a large sample.
 
-The `feed.clj.gz` file I started with I downloaded on 2020-Feb-08.  It
-seemed to work better using a web browser to go to the URL and get the
-file -- for reasons I did not discover, `curl` failed to get the file
-using that URL.
+The `feed.clj.gz` file I started with I downloaded on 2020-Feb-08, and
+can be found in this repository in the `data` directory.  It seemed to
+work better using a web browser to go to the URL and get the file --
+for reasons I did not discover, `curl` failed to get the file using
+that URL.
 
 I decompressed the file to get `feed.clj` and did the following in my
 REPL, using the Clojure code in this repository.
